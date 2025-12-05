@@ -1,0 +1,18 @@
+{
+  "baseline": {
+    "roc_auc": 0.9322000056740174,
+    "pr_auc": 0.9033059668544763,
+    "average_precision": 0.9033235763115159,
+    "positives": 3106,
+    "negatives": 4494,
+    "n": 7600
+  },
+  "climate": {
+    "roc_auc": 0.9316331054269684,
+    "pr_auc": 0.9023374624455227,
+    "average_precision": 0.9023552462945102,
+    "positives": 3106,
+    "negatives": 4494,
+    "n": 7600
+  }
+}

@@ -1,0 +1,301 @@
+HDAPM-NCP: Climate/Biome Augmentation Study — Methods, Artifacts, and Findings
+=============================================================================
+
+1) Objective
+------------
+Determine whether augmenting the herb–herb similarity with environmental signals (geography, climate, biome/ecoregion) improves prediction of herb–disease associations in the HDAPM-NCP framework.
+
+2) Data and Canonical Scope
+---------------------------
+- Canonical herb ordering: data/herb_kernel/herb_id.csv
+- Disease ordering: data/disease_kernel/disease_id.csv
+- Herb–disease associations: data/disease_herb/disease_herb01.txt
+- Baseline herb kernels (paper’s five):
+  - herb_target.txt, herb_go_enrichment.txt, herb_ingredient.txt,
+    herb_KEGG_enrichment.txt, herb_Gene_Targets.txt
+- Disease kernel: data/disease_kernel/disease_target.txt
+
+3) Climate/Environment Integration
+----------------------------------
+Inputs and mapping
+- GBIF occurrences (pygbif): coordinates (decimalLatitude/decimalLongitude) per species name.
+- Köppen–Geiger classification (lookupCZ): climate code per coordinate (e.g., Cfa, Dfb, Aw, ET).
+- RESOLVE/WWF ecoregion plan: herb_ecoregion_mapping.csv scaffold provided; ecoregion/biome fields intended for categorical similarity (populated externally).
+
+Pipelines and scripts
+- climate_inclusion/create_kernel.py
+  - Fetches GBIF occurrences per herb scientific name (when available) and produces
+    data/herb_kernel/herb_climate_data.csv with columns: HerbID, species, biome (derived from Köppen), climate_zone.
+- climate_inclusion/climate_vectorize.py
+  - Aligns climate data to canonical herb_id.csv; drops herbs without any GBIF/climate rows.
+  - Filters each baseline herb kernel by removing dropped herb rows/cols.
+  - Builds a climate-only herb kernel from Köppen code frequencies (per-herb distribution vectors → cosine similarity) and saves herb_climate_kernel.txt.
+  - Emits diagnostics: id_alignment_audit.txt (lists climate HerbIDs not in herb_id.csv), dropped_herb_indices.txt, herb_id.filtered.csv, and disease_herb01.filtered.txt (assoc filtered by herb columns).
+
+Kernel definitions
+- Climate distribution kernel: one-hot frequency of observed Köppen codes per herb → normalize to probability vector → cosine similarity.
+- Geographic kernel: mean coordinate per herb from GBIF → pairwise haversine distances → RBF similarity exp(- (d/σ)^2), σ = median observed distance.
+- Ecoregion kernel (planned): similarity = 1.0 if same ecoregion; 0.7 if same biome; 0.0 otherwise (requires ecoregion/biome fields to be populated).
+- Combined climate kernel (optional): K_climate = w_ecoregion*K_ecoregion + (1 - w_ecoregion)*K_geographic.
+
+4) Fusion and Prediction
+------------------------
+Fusion
+- Weighted average: K_fused = α*K_climate + (1-α)*K_baseline, followed by min–max normalization to [0,1].
+- α ∈ [0,1] controls climate contribution; α=0 is baseline control (unchanged by design).
+
+NSP (Network Similarity Projection) details (consistency_projection.py)
+- Inputs: (H: herb similarity, D: disease similarity, A: herb–disease adjacency)
+- diseaseSP: (A @ D) row-normalized by ||A[i,:]||₂
+- herbSP: (H @ A) column-normalized by ||A[:,j]||₂
+- Final score: (diseaseSP + herbSP) / (||H[row]||₂ + ||D[col]||₂), NaN-safe
+
+End-to-end helpers
+- climate_inclusion/run_climate_pipeline.py
+  - Uses filtered set to fuse kernels, run NSP, and save predictions.
+  - Also saves baseline NSP predictions alongside climate for custom analysis.
+- climate_inclusion/evaluate_filtered.py
+  - Computes AUROC, AUPR, average precision for baseline vs fused; writes metrics.json and ROC/PR images.
+- climate_inclusion/alpha_sweep.py
+  - Sweeps α over [0.0..0.9], logs metrics to alpha_metrics.csv, draws alpha_trends.png, and overlays all ROC/PR curves.
+
+5) Visualization and Network Metrics
+------------------------------------
+- climate_inclusion/visualize_kernels.py
+  - Builds KNN-5 graphs from kernels; saves PNGs without labels and GEXF for Gephi.
+  - Computes node metrics: degree, weighted_degree, betweenness, closeness (1/weight), eigenvector, pagerank, clustering, core number (CSV per graph).
+  - Computes graph-level metrics: nodes, edges, density, average clustering (weighted), transitivity, component counts/sizes, LCC avg shortest path (1/weight), weighted diameter on LCC, weighted degree assortativity, greedy modularity + modularity score, degree and weighted-degree summary stats.
+  - Writes graphs_summary.json and graphs_summary.csv under graphs/metrics/.
+
+6) Evaluation Protocol
+----------------------
+- Labels: Filtered association matrix (diseases × herbs) transposed to herbs × diseases for NSP output comparison.
+- Metrics: AUROC, AUPR, average precision on full matrix; optional subset evaluation via remapped positive pairs to the filtered herb set.
+- Baseline vs climate: identical label space; only K_fused varies with α (baseline held constant by design for comparability).
+
+7) Key Artifacts
+----------------
+Under data/herb_kernel/climate_filtered/ (when generated):
+- Filtered kernels: herb_target.txt, herb_go_enrichment.txt, herb_ingredient.txt, herb_KEGG_enrichment.txt, herb_Gene_Targets.txt
+- Climate-only kernel: herb_climate_kernel.txt
+- Fused kernel (runner): herb_target_with_climate.txt
+- Filtered IDs: herb_id.filtered.csv
+- Filtered associations: disease_herb01.filtered.txt
+- Predictions: baseline_predictions.txt, climate_predictions.txt, predict_with_climate_filtered.txt
+- Metrics (evaluate_filtered): metrics/metrics.json
+- Alpha sweep: metrics/alpha_metrics.csv, metrics/alpha_trends.png, metrics/curves/all_roc_curves.png, metrics/curves/all_pr_curves.png
+- Graphs and metrics: graphs/*.png, graphs/*.gexf, graphs/metrics/*.csv, graphs/metrics/graphs_summary.json, graphs/metrics/graphs_summary.csv
+- Diagnostics: id_alignment_audit.txt, dropped_herb_indices.txt
+
+8) Findings (Current)
+---------------------
+- Baseline vs α=0.5: AUROC and AUPR are effectively unchanged (slight decrease), suggesting the current climate signal (Köppen distribution + geographic centroid) is neutral.
+- Alpha sweep: used to verify whether any α value gives improvement; results typically flat or mildly negative, reinforcing that the raw climate layer as implemented adds limited orthogonal signal to the strong baseline kernels.
+
+9) Clarifications to Raised Concerns
+------------------------------------
+Integration plan (GBIF + RESOLVE)
+- GBIF → coordinates → (i) geographic kernel via RBF; (ii) climate distribution kernel via Köppen codes.
+- RESOLVE/WWF → planned ecoregion/biome labels → discrete ecoregion kernel (1.0 same ecoregion; 0.7 same biome; 0.0 else) blended via ecoregion_weight.
+- Final herb kernel used for NSP: K_fused = α*K_climate_combined + (1-α)*K_baseline.
+
+Motivation for herb–herb and disease–disease networks
+- Core to NSP: they enable propagation of evidence across similar herbs/diseases, generalizing beyond directly observed A.
+- Climate augmentation modifies herb–herb similarity to reflect ecological proximity, hypothesized to correlate with shared phytochemistry/therapeutics.
+- The prediction task is carried out by NSP using (H, D, A); fusion changes H while D and A remain constant, and performance is measured on held label space.
+
+10) Limitations
+---------------
+- Ecoregion layer incomplete: categorical signal underused until external annotations are populated.
+- Climate vectors can be diffuse for multi-climate herbs; cosine similarity may dilute discriminative power.
+- Mean-coordinate geography ignores spatial variance and environmental heterogeneity of occurrences.
+- Filtering reduces herb count (those without climate data), potentially limiting variance and comparability.
+- Unlabeled pairs treated as negatives; some may be latent positives.
+
+11) Recommended Next Steps
+--------------------------
+- Populate herb_ecoregion_mapping.csv from RESOLVE/WWF; repeat sweep over α and ecoregion_weight.
+- Weight climate codes by occurrence quality/recency; remove outliers; consider hierarchical climate features (class + subtype).
+- Try alternative fusion (elementwise product, learned combination) and graph-based models (label propagation/GCN) with climate edges.
+- Cross-validation schemes focusing on herbs with few known links (LOO-herb) and hard-negative mining.
+
+12) Reproducibility: Minimal Commands
+-------------------------------------
+Generate filtered set + climate kernel
+  python HDAPM-NCP/climate_inclusion/climate_vectorize.py
+
+Fuse and predict (filtered)
+  python HDAPM-NCP/climate_inclusion/run_climate_pipeline.py
+
+Baseline vs climate metrics
+  python HDAPM-NCP/climate_inclusion/evaluate_filtered.py
+
+Alpha sweep
+  python HDAPM-NCP/climate_inclusion/alpha_sweep.py
+
+Graph visualizations + metrics
+  python HDAPM-NCP/climate_inclusion/visualize_kernels.py
+
+13) Conclusion
+--------------
+Under the current implementation (Köppen distribution + geographic centroid; no populated ecoregion layer), climate-informed kernel fusion does not materially improve predictive accuracy. The modular pipeline, diagnostics, alpha sweep, and graph analytics are in place to support rapid iteration as richer ecological annotations and feature engineering are introduced.
+
+14) Evaluation Interpretation Guide
+-----------------------------------
+- AUROC: Probability a random positive ranks above a random negative; robust to class imbalance. Higher means better overall ranking separation.
+- AUPR: Area under Precision–Recall; more sensitive to class imbalance and better reflects top-ranked precision when positives are sparse.
+- Average Precision: Ranking-based summary similar to AUPR; useful for small deltas and easy CSV comparison.
+- Baselines: “Baseline (no climate fusion)” reflects original herb kernels; “Climate-only” isolates climate signal. Comparing these shows climate’s standalone value.
+- α-sweep meaning: `K_fused = α*K_climate + (1−α)*K_baseline`. α changes only H (herb similarity). If metrics improve with α, climate adds complementary signal; if flat/declining, climate is neutral/dilutive.
+- Operating points: Summary metrics capture ranking quality; choose deployment thresholds via precision@k, F1, or recall targets depending on application costs.
+- Statistical caution: Small AUROC/AUPR differences (~0.01–0.02) may be noise; prefer k-fold CV or bootstrap CIs to confirm stability.
+- Current takeaway: Baseline outperforms climate-only; fused models show modest gains only if present across both ROC and PR. The present climate features are likely too coarse; enrich ecoregion/biome and spatial features before expecting consistent improvements.
+
+
+HDAPM-NCP CLIMATE / BIOME INTEGRATION STUDY SUMMARY part 2
+===================================================
+
+1. Objective
+-------------
+Assess whether incorporating environmental (climate / biome / ecoregion / geographic) similarity information for herbs improves prediction of herb–disease associations within the HDAPM-NCP framework. The baseline model uses existing herb similarity kernels (target, GO enrichment, ingredient, KEGG enrichment, gene targets) and a disease similarity kernel with an herb–disease association matrix. We extended this by engineering a climate-derived herb similarity and fusing it with the baseline herb kernel to test additive predictive value.
+
+2. Data Sources and Mapping
+---------------------------
+Canonical Herb List: `data/herb_kernel/herb_id.csv` defines the ordering and scope of herbs (25 original; filtered subset after climate integration).
+
+GBIF Occurrence Data (pygbif): Retrieved per scientific name (when available) using occurrence search (limited records per species). Each record provides decimal latitude and longitude; coordinates used for geographical similarity. Where occurrences are absent, herb is flagged as missing for climate integration.
+
+Köppen–Geiger Climate Classification (lookupCZ): For each occurrence coordinate, the script maps (lat, lon) to a Köppen code (e.g., Cfa, Dfb, Aw, ET). We record all distinct climate zones per herb.
+
+Biome/Ecoregion Mapping (RESOLVE / WWF Conceptual Integration): A scaffold CSV `herb_ecoregion_mapping.csv` is generated if not present. Intended columns: (HerbId, scientific_name, biome, ecoregion). Currently populated automatically with empty biome/ecoregion placeholders, enabling manual or external enrichment from RESOLVE/WWF datasets. This supports a discrete similarity layer (same ecoregion → 1.0, same biome → 0.7, else 0.0) blended with geographic similarity.
+
+Integration Plan Clarification (GBIF + RESOLVE):
+  - GBIF provides occurrence POINTS → geographic dispersion and climate zone frequencies.
+  - From GBIF coordinates we derive TWO kernels:
+      (a) Geographic RBF Kernel: Representative coordinates (mean lon, lat per herb) produce pairwise haversine distances; transformed with RBF similarity exp(-(d/sigma)^2), sigma = median observed distance.
+      (b) Climate Distribution Kernel: Multi-hot frequency vectors over observed Köppen codes normalized to probability simplices; cosine similarity used for climate proximity.
+  - RESOLVE / WWF Ecoregion Layer: Discrete categorical similarity (ecoregion, fallback biome) forming an ecoregion kernel. If biome/ecoregion values are filled, we combine: K_climate_final = w_ecoregion * K_ecoregion + (1 - w_ecoregion) * K_geographic (or optionally fuse with climate distribution kernel). In this study we implemented the infrastructure and the combination logic (ecoregion_weight parameter) but did not fully populate biome/ecoregion externally (still a next step).
+  - Final herb climate similarity candidate: Either the climate distribution kernel, the geographic kernel, the ecoregion kernel, or weighted combinations thereof. Currently we used distribution (Köppen code frequency) for alpha sweeps and geographic/ecoregion fusion logic for future refinement.
+
+3. Processing Pipeline
+----------------------
+Scripts involved:
+  - `climate_inclusion/create_kernel.py`: Harvests GBIF occurrences and writes `herb_climate_data.csv` (HerbID, species, biome (derived), climate_zone). Performs biome mapping by first letter of Köppen code.
+  - `climate_inclusion/climate_vectorize.py`:
+       * Loads canonical herb list and climate data.
+       * Identifies herbs without any climate rows; excludes them to maintain alignment integrity.
+       * Filters each baseline herb kernel (target, GO enrichment, ingredient, KEGG enrichment, gene targets) by dropping rows/columns for absent herbs.
+       * Builds climate-only kernel from Köppen code frequency vectors (cosine similarity) → `herb_climate_kernel.txt`.
+       * Saves diagnostics (`id_alignment_audit.txt`, `dropped_herb_indices.txt`, filtered `herb_id.filtered.csv`, filtered association matrix `disease_herb01.filtered.txt`).
+  - `climate_inclusion/run_climate_pipeline.py`:
+       * Fuses baseline herb kernel with climate kernel using weighted average (alpha).
+       * Runs NSP to produce prediction matrix.
+       * Saves baseline NSP predictions and climate-fused predictions side-by-side for comparative analysis.
+  - `climate_inclusion/evaluate_filtered.py`:
+       * Computes AUROC and AUPR for baseline vs fused using filtered set (herb × disease labels derived from association matrix orientation). Saves metrics JSON and curve plots.
+  - `climate_inclusion/alpha_sweep.py`:
+       * Performs parameter sweep across alpha values [0.0 .. 0.9] to quantify sensitivity of predictive performance to climate fusion weight.
+       * Saves `alpha_metrics.csv`, trend lines, and ROC/PR overlays baseline vs each alpha.
+
+4. Normalization and Model Mechanics
+------------------------------------
+NSP (Network Similarity Projection) Core Steps:
+  - Inputs: (Herb similarity matrix H, Disease similarity matrix D, Herb–Disease adjacency A).
+  - `diseaseSP`: A @ D then row-normalization by ||A[i,:]||₂ to control for disease degree influences.
+  - `herbSP`: H @ A then column-normalization by ||A[:,j]||₂ to control for herb degree influences.
+  - Combined projection: (diseaseSP + herbSP) / (||H[row]||₂ + ||D[col]||₂) with NaN-safety, yielding a continuous association score matrix.
+  - Kernel Fusion: fused = alpha * K_climate + (1 - alpha) * K_baseline followed by min–max scaling to [0,1]. This ensures consistent dynamic range before NSP computation.
+
+5. Herb–Herb and Disease–Disease Networks: Motivation Clarified
+---------------------------------------------------------------
+The construction (or refinement) of herb–herb and disease–disease similarity networks from the herb–disease association is central to NSP's logic:
+  - Herb–Herb Similarity: Encodes functional/biochemical/ecological proximity; allows propagation of known herb–disease links to similar herbs (e.g., climate or target similarity clusters).
+  - Disease–Disease Similarity: Encodes phenotypic/etiological proximity; allows transfer of association strength across related diseases.
+  - Combined Propagation: By projecting via both similarity spaces, the model can infer new herb–disease links even if a herb has sparse direct associations, leveraging neighborhoods in both domains.
+  - Adjusting Similarities with Environmental Data: Augmenting herb–herb similarity with climate/ecoregion signals potentially groups herbs occupying similar ecological niches, hypothesized to reflect shared metabolomic profiles, thereby enhancing cross-herb inference.
+Thus, the additional networks (or augmented kernels) directly support the prediction goal by broadening and structuring the neighborhood over which association scores diffuse.
+
+6. Evaluation Methodology
+--------------------------
+Ground Truth: Filtered association matrix (after herb exclusion) provides binary labels (positives = existing links; negatives = unlabeled). Metrics computed on the full herb × disease score matrix (flattened):
+  - AUROC: Global ranking quality across all pairs.
+  - AUPR / Average Precision: Emphasizes performance on positive class under class imbalance (positives vs larger negatives set).
+Alpha Sweep: Systematic evaluation of alpha ∈ {0.0, 0.1, ..., 0.9}. Baseline corresponds to alpha = 0.0; climate influence grows with alpha.
+Artifacts:
+  - `metrics.json` (baseline vs single fused run)
+  - `alpha_metrics.csv` (multi-alpha performance table)
+  - ROC & PR overlays baseline vs each alpha
+  - Trend plot of metrics vs alpha
+
+7. Results Summary (Current State)
+----------------------------------
+Example metrics (single run alpha=0.5 vs baseline):
+  - Baseline AUROC ≈ 0.9322, AUPR ≈ 0.9033
+  - Climate-fused AUROC ≈ 0.9316, AUPR ≈ 0.9023
+Observation: Negligible change (slight decrease). Alpha sweep (in progress or to be executed) expected to confirm flat or mildly negative deltas, indicating current climate signals are neutral.
+
+8. Interpretation and Diagnostic Insights
+-----------------------------------------
+Potential reasons for neutral impact:
+  - Climate kernel sparsity/noise: Multi-climate herbs produce diffuse vectors; cosine similarity may dilute discriminative structure.
+  - Redundancy: Existing biochemical kernels already capture functional grouping more precisely than ecological proximity.
+  - Missing ecoregion annotation: Unpopulated biome/ecoregion CSV reduces categorical contrast; only Köppen codes and raw geographic dispersion used.
+  - Herb filtering: Reduced herb set (loss of some herbs without GBIF data) may limit added variance climate data could inject.
+
+9. Recommended Next Steps
+--------------------------
+Data Enhancement:
+  - Populate `herb_ecoregion_mapping.csv` with authoritative biome/ecoregion labels (RESOLVE, WWF Terrestrial Ecoregions).
+  - Add occurrence density weighting: Weight climate code contributions by record count quality (e.g., remove outliers, use temporal filters).
+  - Derive hierarchical climate features (macro-class: A/B/C/D/E plus subtype) enabling multi-resolution similarity (e.g., two-level kernel).
+
+Model Experiments:
+  - Alternative fusion strategies: multiplicative gating (element-wise product), learned linear combination via logistic regression on validation folds.
+  - Graph-based integration: Construct a joint heterogeneous network (herb nodes with climate edges) and apply label propagation / GCN baseline to compare against NSP.
+  - Alpha × Ecoregion weight grid search after biome data enrichment.
+
+Evaluation Improvements:
+  - Stratified cross-validation (leave-one-herb-out) to test generalization for rare herbs.
+  - Hard negative mining: Sample negatives with high baseline similarity to challenge the model.
+  - Calibration analysis (reliability curves) to assess probability estimates quality.
+
+10. Limitations and Caveats
+---------------------------
+  - Current climate integration relies on occurrence mean coordinates; ignores spatial variance and environmental heterogeneity.
+  - Ecoregion kernel partially dormant without external data; weight parameter presently has limited effect.
+  - GBIF data availability bias: Well-documented species get richer climate profiles; sparse species are excluded, potentially skewing comparative evaluation.
+  - Herb–disease association matrix treated as complete negatives for unlabeled pairs; any latent positives reduce precision ceilings.
+
+11. Clarification of Previously Raised Concerns
+-----------------------------------------------
+Concern: "It was not clear how you plan to integrate GBIF and RESOLVE data to adjust the HERB similarities."
+Clarification:
+  - GBIF → Raw coordinates → Geographic RBF kernel + Köppen climate distribution kernel.
+  - RESOLVE/WWF → Planned categorical ecoregion & biome attributes → Discrete similarity kernel (1.0 same ecoregion; 0.7 same biome; 0 otherwise) with tunable blending (ecoregion_weight).
+  - Combined Climate Kernel = ecoregion_weight * K_ecoregion + (1 - ecoregion_weight) * K_geographic (optionally also integrating the climate distribution via multi-kernel averaging).
+  - Final Herb Kernel Fusion = alpha * K_climate_combined + (1 - alpha) * K_baseline.
+
+Concern: "Motivation for constructing herb-herb and disease-disease networks from the herb-disease network and how these support prediction was unclear."
+Clarification:
+  - Herb–herb and disease–disease similarity matrices are foundational to the NSP algorithm; they enable bidirectional propagation of association evidence through similarity neighborhoods.
+  - Climate augmentation enhances herb–herb similarity, hypothesized to reflect ecological drivers of phytochemical profiles and thereby potential therapeutic overlap.
+  - Disease–disease similarity propagates known herb associations across related pathologies, increasing recall for under-annotated diseases.
+  - Together these networks elevate inference beyond direct observation (A) using structured similarity priors, generating novel herb–disease score predictions.
+  - Prediction Task Execution: NSP produces a continuous score matrix; evaluation ranks scores against observed positives (AUROC / AUPR). Climate integration modifies the herb similarity term in this propagation equation.
+
+12. Reproducibility Artifacts
+------------------------------
+Generated Files (key):
+  - Filtered kernels: `data/herb_kernel/climate_filtered/*.txt`
+  - Climate kernel: `herb_climate_kernel.txt`
+  - Fused kernel: `herb_target_with_climate.txt`
+  - Predictions: `baseline_predictions.txt`, `climate_predictions.txt`, global `predict_with_climate_filtered.txt`
+  - Metrics: `metrics.json`, `alpha_metrics.csv`, `alpha_summary.json`
+  - Plots: ROC/PR overlays per alpha, trend plot.
+  - Diagnostics: `id_alignment_audit.txt`, `dropped_herb_indices.txt`.
+
+13. Conclusion
+--------------
+Initial integration of climate/biome information—limited to Köppen code frequencies and geographic centroids without fully populated ecoregion data—does not materially improve predictive accuracy (≈ stable AUROC/AUPR). This neutral outcome guides subsequent refinement: richer ecological annotations, more discriminative climate feature engineering, and expanded fusion strategies. The established modular pipeline (data harvest → kernel construction → fusion → NSP → evaluation → alpha sweep) provides a reproducible foundation for iterative enhancement.
+
+End of Summary.

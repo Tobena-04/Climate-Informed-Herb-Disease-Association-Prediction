@@ -1,0 +1,22 @@
+{
+  "alphas_tested": [
+    0.0,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9
+  ],
+  "best_by_roc_auc": {
+    "alpha": 0.9,
+    "roc_auc": 0.955601172171753,
+    "pr_auc": 0.9451725123711137,
+    "average_precision": 0.9451806414667983
+  },
+  "metrics_csv": "/Users/tobennaudeze/Desktop/HDAPM-NCP/HDAPM-NCP/data/herb_kernel/climate_filtered/metrics/alpha_metrics.csv",
+  "trend_plot": "/Users/tobennaudeze/Desktop/HDAPM-NCP/HDAPM-NCP/data/herb_kernel/climate_filtered/metrics/alpha_trends.png"
+}

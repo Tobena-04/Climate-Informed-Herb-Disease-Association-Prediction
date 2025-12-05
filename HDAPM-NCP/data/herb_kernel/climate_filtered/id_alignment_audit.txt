@@ -1,0 +1,4 @@
+Canonical herb_id.csv count: 25
+Unique HerbIDs in climate CSV: 19
+In-scope climate HerbIDs (kept): 19
+Out-of-scope climate HerbIDs (excluded): 0
